@@ -1,0 +1,6 @@
+[2026-04-03 02:14:18,636] [INFO] [main] Starting Data Engineering Pipeline
+[2026-04-03 02:14:18,636] [INFO] [main] Configuration: root=dummy_data, db=dummy.db
+[2026-04-03 02:14:18,671] [INFO] [main] Starting Stage 1: SCAN
+[2026-04-03 02:14:18,671] [INFO] [scanner] Starting scan of dummy_data (force_rescan=False)
+[2026-04-03 02:14:18,679] [INFO] [scanner] Scan complete. Scanned: 1, Skipped: 0
+[2026-04-03 02:14:18,679] [INFO] [main] Stopping after scan stage due to --only-scan
