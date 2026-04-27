@@ -98,6 +98,28 @@ def test_messenger_rtc_detection():
     assert "audio" in rows[0]["tresc"]
 
 
+def test_call_logger_uses_datetime_when_timestamp_is_not_numeric():
+    df = pd.DataFrame(
+        [
+            {
+                "timestamp": "2026-01-01T10:00:00+00:00",
+                "datetime": "2026-01-01 10:00:00+00:00",
+                "number": "+48111222333",
+                "name": "Test Contact",
+                "call_type": "incoming",
+                "duration": "84",
+            }
+        ]
+    )
+
+    rows = detect_and_parse(df, "call_logger.csv")
+
+    assert rows is not None
+    assert len(rows) == 1
+    assert rows[0]["data_czas"] == pd.Timestamp("2026-01-01 10:00:00+00:00", tz="UTC")
+    assert rows[0]["numer"] == "111222333"
+
+
 def test_empty_csv_and_txt_do_not_crash(tmp_path):
     empty_csv = tmp_path / "empty.csv"
     empty_txt = tmp_path / "empty.txt"

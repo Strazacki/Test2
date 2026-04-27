@@ -211,9 +211,12 @@ def parse_call_logger(df, path):
         call_type = str(row.get("call_type", "")).replace("CallType.", "").lower()
         raw_timestamp = row.get("timestamp", "")
         ts = pd.NaT
+
         if str(raw_timestamp).strip() and str(raw_timestamp).lower() != "nan":
-            ts = pd.to_datetime(pd.to_numeric(raw_timestamp, errors="coerce"), unit="ms", utc=True, errors="coerce")
-        else:
+            timestamp_numeric = pd.to_numeric(raw_timestamp, errors="coerce")
+            ts = pd.to_datetime(timestamp_numeric, unit="ms", utc=True, errors="coerce")
+
+        if pd.isna(ts):
             ts = pd.to_datetime(row.get("datetime", ""), utc=True, errors="coerce")
 
         rows.append({
