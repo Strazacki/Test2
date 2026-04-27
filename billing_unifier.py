@@ -18,6 +18,18 @@ SKIP_PATTERNS = [
     "Wyniki_Frazy_Slowa.csv",
 ]
 
+NON_BILLING_KEYWORDS = [
+    "contact",
+    "kontakty",
+    "plan",
+    "plans",
+    "sip",
+    "callback",
+    "voicemail",
+    "ustawienia",
+    "settings",
+]
+
 ENCODINGS = [
     "utf-8-sig",
     "utf-8",
@@ -178,6 +190,23 @@ def read_table(path: str) -> pd.DataFrame:
         return pd.read_excel(path, dtype=str).fillna("")
 
     raise ValueError(f"Nieobsługiwany format: {ext}")
+
+
+def _is_non_billing_path(path: str) -> bool:
+    path_lower = path.lower()
+    return any(keyword in path_lower for keyword in NON_BILLING_KEYWORDS)
+
+
+def _is_invalid_excel_error(error: Exception) -> bool:
+    msg = str(error).lower()
+    indicators = [
+        "not well-formed",
+        "invalid token",
+        "xml",
+        "badzipfile",
+        "file is not a zip file",
+    ]
+    return any(indicator in msg for indicator in indicators)
 
 
 def parse_kv_line(line: str) -> dict:
@@ -719,7 +748,7 @@ def main():
             continue
 
         log.info(f"Przetwarzam: {path}")
-        stats[path] = {"records": 0, "duplicates": 0, "error": None}
+        stats[path] = {"records": 0, "duplicates": 0, "error": None, "warning": None}
 
         try:
             if Path(path).suffix.lower() == ".txt":
@@ -740,7 +769,10 @@ def main():
             if result is None:
                 cols = list(df.columns)[:12] if not df.empty else []
                 log.warning(f"  Nieznany format — pomijam. Kolumny: {cols}")
-                stats[path]["error"] = "nieznany format"
+                if _is_non_billing_path(path) or (Path(path).suffix.lower() == ".txt" and df.empty):
+                    stats[path]["warning"] = "skipped_non_billing_unknown_format"
+                else:
+                    stats[path]["warning"] = "skipped_unknown_format"
                 continue
 
             added = 0
@@ -761,8 +793,12 @@ def main():
             log.info(f"  Dodano: {added}, duplikatów: {dupes}")
 
         except Exception as e:
-            log.error(f"  Błąd: {e}")
-            stats[path]["error"] = str(e)
+            if Path(path).suffix.lower() in [".xlsx", ".xls"] and _is_invalid_excel_error(e):
+                log.warning(f"  Uszkodzony plik Excel — pomijam: {e}")
+                stats[path]["warning"] = "skipped_invalid_excel"
+            else:
+                log.error(f"  Błąd: {e}")
+                stats[path]["error"] = str(e)
 
     if not all_rows:
         log.warning("Brak danych do ujednolicenia.")
@@ -795,21 +831,23 @@ def main():
     log.info(f"WYNIK bez Messengera: {WYNIK_BEZ_MESSENGERA}")
     total_duplicates = sum(s.get("duplicates", 0) for s in stats.values())
     error_files = sum(1 for s in stats.values() if s.get("error"))
+    warning_files = sum(1 for s in stats.values() if s.get("warning"))
     log.info(f"Łączna liczba rekordów: {len(final_df)}")
     log.info(f"Liczba rekordów bez Messengera: {len(bez_msg)}")
     log.info(f"Suma duplikatów: {total_duplicates}")
     log.info(f"Liczba plików z błędami: {error_files}")
+    log.info(f"Liczba plików z warningami: {warning_files}")
 
-    log.info("Statystyki plików (plik, records, duplicates, error):")
+    log.info("Statystyki plików (plik, records, duplicates, warning, error):")
     if stats:
         stats_table = pd.DataFrame(
             [{"plik": p, **v} for p, v in stats.items()],
-            columns=["plik", "records", "duplicates", "error"],
+            columns=["plik", "records", "duplicates", "warning", "error"],
         )
         for _, row in stats_table.iterrows():
             log.info(
                 f"  {row['plik']}, records={row['records']}, "
-                f"duplicates={row['duplicates']}, error={row['error']}"
+                f"duplicates={row['duplicates']}, warning={row['warning']}, error={row['error']}"
             )
 
 
