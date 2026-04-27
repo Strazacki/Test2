@@ -527,7 +527,10 @@ def detect_and_parse(df, path):
         log.info("  Format: call_logger")
         return parse_call_logger(df, path)
 
-    if {"date", "duration", "type_label"}.issubset(cols) and ({"number"}.issubset(cols) or {"normalized_number"}.issubset(cols)):
+    has_call_history_time = {"date", "duration"}.issubset(cols)
+    has_call_history_type = "type_label" in cols or "type" in cols
+    has_call_history_number = "number" in cols or "normalized_number" in cols
+    if has_call_history_time and has_call_history_type and has_call_history_number:
         log.info("  Format: call_history_clean")
         return parse_call_history_clean(df, path)
 
