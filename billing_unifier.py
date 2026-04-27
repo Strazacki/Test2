@@ -18,6 +18,18 @@ SKIP_PATTERNS = [
     "Wyniki_Frazy_Slowa.csv",
 ]
 
+NON_BILLING_KEYWORDS = [
+    "contact",
+    "kontakty",
+    "plan",
+    "plans",
+    "sip",
+    "callback",
+    "voicemail",
+    "ustawienia",
+    "settings",
+]
+
 ENCODINGS = [
     "utf-8-sig",
     "utf-8",
@@ -167,6 +179,9 @@ def read_table(path: str) -> pd.DataFrame:
                 ).fillna("")
                 log.debug(f"  TXT/CSV odczytano enc={enc} sep={repr(sep)} shape={df.shape}")
                 return df
+            except pd.errors.EmptyDataError:
+                log.warning("  Pusty plik TXT/CSV — brak kolumn do parsowania.")
+                return pd.DataFrame()
             except Exception as e:
                 last_exc = e
         raise ValueError(f"Nie udało się odczytać TXT/CSV: {last_exc}")
@@ -175,6 +190,23 @@ def read_table(path: str) -> pd.DataFrame:
         return pd.read_excel(path, dtype=str).fillna("")
 
     raise ValueError(f"Nieobsługiwany format: {ext}")
+
+
+def _is_non_billing_path(path: str) -> bool:
+    path_lower = path.lower()
+    return any(keyword in path_lower for keyword in NON_BILLING_KEYWORDS)
+
+
+def _is_invalid_excel_error(error: Exception) -> bool:
+    msg = str(error).lower()
+    indicators = [
+        "not well-formed",
+        "invalid token",
+        "xml",
+        "badzipfile",
+        "file is not a zip file",
+    ]
+    return any(indicator in msg for indicator in indicators)
 
 
 def parse_kv_line(line: str) -> dict:
@@ -206,9 +238,18 @@ def parse_call_logger(df, path):
 
     for _, row in df.iterrows():
         call_type = str(row.get("call_type", "")).replace("CallType.", "").lower()
+        raw_timestamp = row.get("timestamp", "")
+        ts = pd.NaT
+
+        if str(raw_timestamp).strip() and str(raw_timestamp).lower() != "nan":
+            timestamp_numeric = pd.to_numeric(raw_timestamp, errors="coerce")
+            ts = pd.to_datetime(timestamp_numeric, unit="ms", utc=True, errors="coerce")
+
+        if pd.isna(ts):
+            ts = pd.to_datetime(row.get("datetime", ""), utc=True, errors="coerce")
 
         rows.append({
-            "data_czas": pd.to_datetime(pd.to_numeric(row.get("timestamp", ""), errors="coerce"), unit="ms", utc=True, errors="coerce"),
+            "data_czas": ts,
             "numer": normalize_number(row.get("number", "")),
             "nazwa_kontaktu": fix_mojibake(row.get("name", "")),
             "typ": "Połączenie",
@@ -373,6 +414,94 @@ def parse_messenger(df, path):
     return rows
 
 
+def parse_messenger_simple(df, path):
+    rows = []
+    for _, row in df.iterrows():
+        rows.append({
+            "data_czas": pd.to_datetime(row.get("datetime", ""), errors="coerce", utc=True),
+            "numer": "",
+            "nazwa_kontaktu": fix_mojibake(row.get("sender", "")),
+            "typ": "Messenger",
+            "kierunek": "",
+            "czas_trwania": "",
+            "tresc": fix_mojibake(row.get("text", "")),
+            "plik_zrodlowy": path,
+        })
+    return rows
+
+
+def parse_messenger_rtc(df, path):
+    rows = []
+    direction_map = {
+        "incoming": "Przychodzące",
+        "outgoing": "Wychodzące",
+    }
+
+    for _, row in df.iterrows():
+        direction_raw = str(row.get("call_direction", "")).lower().strip()
+        call_type = str(row.get("call_type", "")).strip()
+        call_state = str(row.get("call_state", "")).strip()
+
+        rows.append({
+            "data_czas": pd.to_datetime(pd.to_numeric(row.get("call_timestamp_ms", ""), errors="coerce"), unit="ms", utc=True, errors="coerce"),
+            "numer": "",
+            "nazwa_kontaktu": fix_mojibake(row.get("thread_key", "")),
+            "typ": "Messenger",
+            "kierunek": direction_map.get(direction_raw, direction_raw),
+            "czas_trwania": normalize_duration(row.get("call_duration", "")),
+            "tresc": fix_mojibake(f"{call_type} {call_state}".strip()),
+            "plik_zrodlowy": path,
+        })
+    return rows
+
+
+def parse_messenger_rtc_event_variant(df, path):
+    rows = []
+    event_direction_map = {
+        "incoming": "Przychodzące",
+        "outgoing": "Wychodzące",
+    }
+
+    for _, row in df.iterrows():
+        event_type = str(row.get("event_type", "")).strip()
+        event_type_norm = event_type.lower()
+
+        if not event_type_norm:
+            continue
+
+        if "call" not in event_type_norm and "rtc" not in event_type_norm:
+            continue
+
+        direction_raw = ""
+        if "incoming" in event_type_norm:
+            direction_raw = "incoming"
+        elif "outgoing" in event_type_norm:
+            direction_raw = "outgoing"
+
+        timestamp_raw = row.get("event_time", "")
+        ts = pd.to_datetime(pd.to_numeric(timestamp_raw, errors="coerce"), unit="ms", utc=True, errors="coerce")
+        if pd.isna(ts):
+            ts = pd.to_datetime(timestamp_raw, errors="coerce", utc=True)
+
+        thread = row.get("thread_id", "") or row.get("pk", "")
+        duration = row.get("call_duration", "") or row.get("call_duration_text", "")
+        video_flag = str(row.get("is_video_call", "")).strip().lower()
+        media = "video" if video_flag in {"1", "true", "yes"} else "audio"
+
+        rows.append({
+            "data_czas": ts,
+            "numer": "",
+            "nazwa_kontaktu": fix_mojibake(thread),
+            "typ": "Messenger",
+            "kierunek": event_direction_map.get(direction_raw, ""),
+            "czas_trwania": normalize_duration(duration),
+            "tresc": fix_mojibake(f"{event_type} {media}".strip()),
+            "plik_zrodlowy": path,
+        })
+
+    return rows
+
+
 def parse_preview(df, path):
     rows = []
 
@@ -413,6 +542,16 @@ def parse_logger_xlsx(df, path):
     rows = []
 
     for _, row in df.iterrows():
+        timestamp_ms = pd.to_numeric(row.get("timestamp ms", ""), errors="coerce")
+        number_value = normalize_number(row.get("number raw", "") or row.get("cached matched number", ""))
+        duration_value = normalize_duration(row.get("duration s", ""))
+        name_value = fix_mojibake(row.get("name", ""))
+
+        if pd.isna(timestamp_ms):
+            continue
+        if not number_value and not duration_value and not name_value:
+            continue
+
         call_type = str(row.get("call type", "")).lower().strip()
 
         call_type_map = {
@@ -424,12 +563,12 @@ def parse_logger_xlsx(df, path):
         }
 
         rows.append({
-            "data_czas": pd.to_datetime(pd.to_numeric(row.get("timestamp ms", ""), errors="coerce"), unit="ms", utc=True, errors="coerce"),
-            "numer": normalize_number(row.get("number raw", "") or row.get("cached matched number", "")),
-            "nazwa_kontaktu": fix_mojibake(row.get("name", "")),
+            "data_czas": pd.to_datetime(timestamp_ms, unit="ms", utc=True, errors="coerce"),
+            "numer": number_value,
+            "nazwa_kontaktu": name_value,
             "typ": "Połączenie",
             "kierunek": call_type_map.get(call_type, fix_mojibake(call_type)),
-            "czas_trwania": normalize_duration(row.get("duration s", "")),
+            "czas_trwania": duration_value,
             "tresc": "",
             "plik_zrodlowy": path,
         })
@@ -442,14 +581,12 @@ def parse_billdata(df, path):
 
     for _, row in df.iterrows():
         raw_time = row.get("Czas trwania", "")
-        typ = "SMS" if "szt" in str(raw_time).lower() or re.fullmatch(r"\d+", str(raw_time).strip()) else "Połączenie"
-
         rodzaj = str(row.get("Rodzaj połącz.", "")).lower()
-        if "sms" in rodzaj:
+        if "szt" in str(raw_time).lower() or "sms" in rodzaj:
             typ = "SMS"
         elif "mms" in rodzaj:
             typ = "MMS"
-        elif "rozm" in rodzaj or "poł" in rodzaj:
+        else:
             typ = "Połączenie"
 
         rows.append({
@@ -478,7 +615,10 @@ def parse_xls_operator(df, path):
 
     if header_row is not None:
         sub = df.iloc[header_row:].copy()
-        sub.columns = [str(v).strip() for v in sub.iloc[0].values]
+        header_cols = [str(v).strip() for v in sub.iloc[0].values]
+        if len(header_cols) < len(sub.columns):
+            header_cols += [f"extra_{i}" for i in range(len(sub.columns) - len(header_cols))]
+        sub.columns = header_cols[:len(sub.columns)]
         sub = sub.iloc[1:].reset_index(drop=True)
     else:
         sub = df.copy()
@@ -490,7 +630,10 @@ def parse_xls_operator(df, path):
         if not data or data.lower() == "nan":
             continue
 
-        ts = pd.to_datetime(f"{data} {godz}", errors="coerce", utc=True)
+        dt_value = f"{data} {godz}".strip()
+        ts = pd.to_datetime(dt_value, format="%Y.%m.%d %H:%M:%S", errors="coerce", utc=True)
+        if pd.isna(ts):
+            ts = pd.to_datetime(dt_value, errors="coerce", utc=True, dayfirst=True)
 
         numer = row.get("Numer telefonu", "")
         if str(numer).lower() in ["internet", "nan", ""]:
@@ -523,7 +666,7 @@ def detect_and_parse(df, path):
         log.info("  Format: txt_sms_history")
         return parse_txt_sms_history(path)
 
-    if {"call_type", "duration", "timestamp", "number"}.issubset(cols):
+    if {"call_type", "duration", "number"}.issubset(cols) and ("timestamp" in cols or "datetime" in cols):
         log.info("  Format: call_logger")
         return parse_call_logger(df, path)
 
@@ -545,6 +688,18 @@ def detect_and_parse(df, path):
     if {"thread", "datetime", "sender", "text"}.issubset(cols):
         log.info("  Format: messenger")
         return parse_messenger(df, path)
+
+    if {"datetime", "sender", "text"}.issubset(cols):
+        log.info("  Format: messenger_simple")
+        return parse_messenger_simple(df, path)
+
+    if {"thread_key", "call_type", "call_direction", "call_timestamp_ms", "call_duration"}.issubset(cols):
+        log.info("  Format: messenger_rtc")
+        return parse_messenger_rtc(df, path)
+
+    if {"pk", "thread_id", "event_type", "event_time", "call_duration"}.issubset(cols):
+        log.info("  Format: messenger_rtc_event_variant")
+        return parse_messenger_rtc_event_variant(df, path)
 
     if {"data godz", "call type", "number raw", "duration s", "timestamp ms"}.issubset(cols):
         log.info("  Format: logger_xlsx")
@@ -593,7 +748,7 @@ def main():
             continue
 
         log.info(f"Przetwarzam: {path}")
-        stats[path] = {"records": 0, "duplicates": 0, "error": None}
+        stats[path] = {"records": 0, "duplicates": 0, "error": None, "warning": None}
 
         try:
             if Path(path).suffix.lower() == ".txt":
@@ -605,14 +760,19 @@ def main():
                     first_col = df.columns[0]
                     split_cols = [x.strip() for x in first_col.split(",")]
                     df = df[first_col].str.split(",", expand=True)
-                    df.columns = split_cols[:len(df.columns)]
+                    if len(split_cols) < len(df.columns):
+                        split_cols += [f"extra_{i}" for i in range(len(df.columns) - len(split_cols))]
+                    df.columns = split_cols[:len(df.columns)] if len(split_cols) > len(df.columns) else split_cols
 
             result = detect_and_parse(df, path)
 
             if result is None:
                 cols = list(df.columns)[:12] if not df.empty else []
                 log.warning(f"  Nieznany format — pomijam. Kolumny: {cols}")
-                stats[path]["error"] = "nieznany format"
+                if _is_non_billing_path(path) or (Path(path).suffix.lower() == ".txt" and df.empty):
+                    stats[path]["warning"] = "skipped_non_billing_unknown_format"
+                else:
+                    stats[path]["warning"] = "skipped_unknown_format"
                 continue
 
             added = 0
@@ -633,8 +793,12 @@ def main():
             log.info(f"  Dodano: {added}, duplikatów: {dupes}")
 
         except Exception as e:
-            log.error(f"  Błąd: {e}")
-            stats[path]["error"] = str(e)
+            if Path(path).suffix.lower() in [".xlsx", ".xls"] and _is_invalid_excel_error(e):
+                log.warning(f"  Uszkodzony plik Excel — pomijam: {e}")
+                stats[path]["warning"] = "skipped_invalid_excel"
+            else:
+                log.error(f"  Błąd: {e}")
+                stats[path]["error"] = str(e)
 
     if not all_rows:
         log.warning("Brak danych do ujednolicenia.")
@@ -665,6 +829,26 @@ def main():
     log.info("\n" + "=" * 70)
     log.info(f"WYNIK: {WYNIK_PATH}")
     log.info(f"WYNIK bez Messengera: {WYNIK_BEZ_MESSENGERA}")
+    total_duplicates = sum(s.get("duplicates", 0) for s in stats.values())
+    error_files = sum(1 for s in stats.values() if s.get("error"))
+    warning_files = sum(1 for s in stats.values() if s.get("warning"))
+    log.info(f"Łączna liczba rekordów: {len(final_df)}")
+    log.info(f"Liczba rekordów bez Messengera: {len(bez_msg)}")
+    log.info(f"Suma duplikatów: {total_duplicates}")
+    log.info(f"Liczba plików z błędami: {error_files}")
+    log.info(f"Liczba plików z warningami: {warning_files}")
+
+    log.info("Statystyki plików (plik, records, duplicates, warning, error):")
+    if stats:
+        stats_table = pd.DataFrame(
+            [{"plik": p, **v} for p, v in stats.items()],
+            columns=["plik", "records", "duplicates", "warning", "error"],
+        )
+        for _, row in stats_table.iterrows():
+            log.info(
+                f"  {row['plik']}, records={row['records']}, "
+                f"duplicates={row['duplicates']}, warning={row['warning']}, error={row['error']}"
+            )
 
 
 if __name__ == "__main__":
