@@ -426,6 +426,53 @@ def parse_messenger_rtc(df, path):
     return rows
 
 
+def parse_messenger_rtc_event_variant(df, path):
+    rows = []
+    event_direction_map = {
+        "incoming": "Przychodzące",
+        "outgoing": "Wychodzące",
+    }
+
+    for _, row in df.iterrows():
+        event_type = str(row.get("event_type", "")).strip()
+        event_type_norm = event_type.lower()
+
+        if not event_type_norm:
+            continue
+
+        if "call" not in event_type_norm and "rtc" not in event_type_norm:
+            continue
+
+        direction_raw = ""
+        if "incoming" in event_type_norm:
+            direction_raw = "incoming"
+        elif "outgoing" in event_type_norm:
+            direction_raw = "outgoing"
+
+        timestamp_raw = row.get("event_time", "")
+        ts = pd.to_datetime(pd.to_numeric(timestamp_raw, errors="coerce"), unit="ms", utc=True, errors="coerce")
+        if pd.isna(ts):
+            ts = pd.to_datetime(timestamp_raw, errors="coerce", utc=True)
+
+        thread = row.get("thread_id", "") or row.get("pk", "")
+        duration = row.get("call_duration", "") or row.get("call_duration_text", "")
+        video_flag = str(row.get("is_video_call", "")).strip().lower()
+        media = "video" if video_flag in {"1", "true", "yes"} else "audio"
+
+        rows.append({
+            "data_czas": ts,
+            "numer": "",
+            "nazwa_kontaktu": fix_mojibake(thread),
+            "typ": "Messenger",
+            "kierunek": event_direction_map.get(direction_raw, ""),
+            "czas_trwania": normalize_duration(duration),
+            "tresc": fix_mojibake(f"{event_type} {media}".strip()),
+            "plik_zrodlowy": path,
+        })
+
+    return rows
+
+
 def parse_preview(df, path):
     rows = []
 
@@ -466,6 +513,16 @@ def parse_logger_xlsx(df, path):
     rows = []
 
     for _, row in df.iterrows():
+        timestamp_ms = pd.to_numeric(row.get("timestamp ms", ""), errors="coerce")
+        number_value = normalize_number(row.get("number raw", "") or row.get("cached matched number", ""))
+        duration_value = normalize_duration(row.get("duration s", ""))
+        name_value = fix_mojibake(row.get("name", ""))
+
+        if pd.isna(timestamp_ms):
+            continue
+        if not number_value and not duration_value and not name_value:
+            continue
+
         call_type = str(row.get("call type", "")).lower().strip()
 
         call_type_map = {
@@ -477,12 +534,12 @@ def parse_logger_xlsx(df, path):
         }
 
         rows.append({
-            "data_czas": pd.to_datetime(pd.to_numeric(row.get("timestamp ms", ""), errors="coerce"), unit="ms", utc=True, errors="coerce"),
-            "numer": normalize_number(row.get("number raw", "") or row.get("cached matched number", "")),
-            "nazwa_kontaktu": fix_mojibake(row.get("name", "")),
+            "data_czas": pd.to_datetime(timestamp_ms, unit="ms", utc=True, errors="coerce"),
+            "numer": number_value,
+            "nazwa_kontaktu": name_value,
             "typ": "Połączenie",
             "kierunek": call_type_map.get(call_type, fix_mojibake(call_type)),
-            "czas_trwania": normalize_duration(row.get("duration s", "")),
+            "czas_trwania": duration_value,
             "tresc": "",
             "plik_zrodlowy": path,
         })
@@ -544,7 +601,10 @@ def parse_xls_operator(df, path):
         if not data or data.lower() == "nan":
             continue
 
-        ts = pd.to_datetime(f"{data} {godz}", errors="coerce", utc=True, dayfirst=True)
+        dt_value = f"{data} {godz}".strip()
+        ts = pd.to_datetime(dt_value, format="%Y.%m.%d %H:%M:%S", errors="coerce", utc=True)
+        if pd.isna(ts):
+            ts = pd.to_datetime(dt_value, errors="coerce", utc=True, dayfirst=True)
 
         numer = row.get("Numer telefonu", "")
         if str(numer).lower() in ["internet", "nan", ""]:
@@ -607,6 +667,10 @@ def detect_and_parse(df, path):
     if {"thread_key", "call_type", "call_direction", "call_timestamp_ms", "call_duration"}.issubset(cols):
         log.info("  Format: messenger_rtc")
         return parse_messenger_rtc(df, path)
+
+    if {"pk", "thread_id", "event_type", "event_time", "call_duration"}.issubset(cols):
+        log.info("  Format: messenger_rtc_event_variant")
+        return parse_messenger_rtc_event_variant(df, path)
 
     if {"data godz", "call type", "number raw", "duration s", "timestamp ms"}.issubset(cols):
         log.info("  Format: logger_xlsx")
